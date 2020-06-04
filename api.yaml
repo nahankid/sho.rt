@@ -1,0 +1,207 @@
+openapi: "3.0.1"
+info:
+  title: "URL Shortener API"
+  version: "2.0.0"
+
+x-amazon-apigateway-request-validators:
+  all:
+    validateRequestBody: true
+    validateRequestParameters: true
+  params:
+    validateRequestBody: false
+    validateRequestParameters: true
+  body:
+    validateRequestBody: true
+    validateRequestParameters: false
+
+paths:
+  /{linkId}:
+    ## URL redirector
+    get:
+      summary: Get a url by ID and redirect
+      x-amazon-apigateway-request-validator: params
+      parameters:
+        - in: path
+          name: linkId
+          schema:
+            type: string
+          required: true
+          description: Short link ID for full URL
+      responses:
+        "301":
+          description: "301 redirect"
+          headers:
+            Location:
+              type: "string"
+            Cache-Control:
+              type: "string"
+      
+      ## API Gateway Integration
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::GetAtt: [ DDBReadRole, Arn ]
+        uri: {"Fn::Sub":"arn:aws:apigateway:${AWS::Region}:dynamodb:action/GetItem"}
+        httpMethod: "POST"
+        requestTemplates:
+          application/json: {"Fn::Sub": "{\"Key\": {\"short_url\": {\"S\": \"$input.params().path.linkId\"}}, \"TableName\": \"${LinkTable}\"}"}
+        passthroughBehavior: "when_no_templates"
+        responses:
+          "200":
+            statusCode: "301"
+            responseParameters:
+              method.response.header.Location: "'https://${ShortenerAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod?error=url_not_found'"
+              method.response.header.Cache-Control: "'max-age=300'"
+            responseTemplates:
+              application/json: "#set($inputRoot = $input.path('$')) \
+                #if($inputRoot.toString().contains(\"Item\")) \
+                #set($context.responseOverride.header.Location = $inputRoot.Item.long_url.S) \
+                #end"
+        type: "aws"
+
+  /:
+    ## Get all links for user
+    get:
+      summary: Fetch all links for authenticated user
+      security:
+      - APIKeyAuthorizer: []
+      parameters:
+        - $ref: '#/components/parameters/authHeader'
+      responses:
+        "200":
+          description: "200 response"
+          headers:
+            Access-Control-Allow-Origin:
+              type: "string"
+            Cache-Control:
+              type: "string"
+            
+      ## API Gateway Integration
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::GetAtt: [ DDBReadRole, Arn ]
+        uri: {"Fn::Sub":"arn:aws:apigateway:${AWS::Region}:dynamodb:action/Query"}
+        httpMethod: "POST"
+        requestTemplates:
+          application/json: { "Fn::Sub": "{\"TableName\": \"${LinkTable}\", \
+            \"IndexName\":\"APIKeyIndex\",\"KeyConditionExpression\": \"#n_api_key = :v_api_key\", \
+            \"ExpressionAttributeValues\": \
+            {\":v_api_key\": {\"S\": \"$context.identity.apiKey\"}},\"ExpressionAttributeNames\": {\"#n_api_key\": \"api_key\"}}"}
+        passthroughBehavior: "when_no_templates"
+        responses:
+          "200":
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Cache-Control: "'no-cache, no-store'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            responseTemplates:
+              application/json: "#set($inputRoot = $input.path('$'))[ \
+                #foreach($elem in $inputRoot.Items) { \
+                  \"short_url\":\"$elem.short_url.S\", \
+                  \"long_url\": \"$elem.long_url.S\"} \
+                #if($foreach.hasNext),#end \
+                #end]"
+        type: "AWS"
+
+    ## Create a new link
+    post:
+      summary: Create new url
+      x-amazon-apigateway-request-validator: body
+      security:
+        - APIKeyAuthorizer: []
+      parameters:
+        - $ref: '#/components/parameters/authHeader'
+      requestBody:
+        description: Optional description in *Markdown*
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostBody'
+      responses:
+        "200":
+          description: "200 response"
+          headers:
+            Access-Control-Allow-Origin:
+              type: "string"
+        "400":
+          description: "400 response"
+          headers:
+            Access-Control-Allow-Origin:
+              type: "string"
+
+      ## API Gateway integration
+      x-amazon-apigateway-integration:
+        type: aws_proxy   
+        httpMethod: POST
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ShortenFunction.Arn}/invocations
+        passthroughBehavior: "when_no_templates"
+        responses:
+          "200":
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          "400":
+            statusCode: "400"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+
+    ## Options for get and post
+    options:
+      responses:
+        "200":
+          description: "200 response"
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: "string"
+            Access-Control-Allow-Methods:
+              schema:
+                type: "string"
+            Access-Control-Allow-Headers:
+              schema:
+                type: "string"
+          content: {}
+      x-amazon-apigateway-integration:
+        type: "mock"
+        requestTemplates:
+          application/json: "{\"statusCode\": 200}"
+        passthroughBehavior: "when_no_match"
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            responseTemplates:
+              application/json: |
+                {}
+## Validation models
+components:
+  schemas:
+    PostBody:
+      type: object
+      properties:
+        url:
+          type: string
+          pattern: ^https?://[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\+.~#?&//=]*)
+        expiry_days:
+          type: integer
+      required:
+        - url
+  parameters:
+    authHeader:
+      in: header
+      name: x-api-key
+      required: true
+      description: Contains authorization token
+      schema:
+        type: string
+
+## Authorizer definition
+securityDefinitions:
+  APIKeyAuthorizer:
+    type: apiKey  
+    name: x-api-key
+    in: header

@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Fast URL Shortener in Go
+
+###################################################################################################
+##   Global Variablees                                                                           ##
+##   More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+###################################################################################################
+Globals:
+  Function:
+    Runtime: go1.x
+    Tracing: Active # https://docs.aws.amazon.com/lambda/latest/dg/lambda-x-ray.html
+
+##################################################################################################
+##   Template Resources                                                                          ##
+###################################################################################################
+Resources:
+  ##   API Gateway                                                                                 
+  ShortenerAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: "URL Shortener API"
+      StageName: Prod
+      EndpointConfiguration: REGIONAL
+      TracingEnabled: true
+      Auth:
+        ApiKeyRequired: true # sets for all methods 
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          Description: Usage plan for this API
+          Quota:
+            Limit: 500
+            Period: MONTH
+          Throttle:
+            BurstLimit: 100
+            RateLimit: 50
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+          ThrottlingRateLimit: 3000
+          ThrottlingBurstLimit: 1500
+        - HttpMethod: "GET"
+          ResourcePath: "/{linkId}"
+          ThrottlingRateLimit: 10000
+          ThrottlingBurstLimit: 4000          
+      DefinitionBody:
+        'Fn::Transform':
+          Name: 'AWS::Include'
+          Parameters:
+            Location: './api.yaml'
+
+  ##   URL DynamoDB Table
+  LinkTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ShortenerAPI-LinkTable
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: short_url
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: short_url
+          AttributeType: S
+        - AttributeName: api_key
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: APIKeyIndex
+          KeySchema:
+            - AttributeName: api_key
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: True
+
+  ShortenFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: controllers/shorten
+      Handler: shorten
+      Events:
+        CatchAll:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /
+            Method: POST
+            RestApiId: !Ref ShortenerAPI
+            Auth:
+              ApiKeyRequired: true # sets for all methods
+
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'dynamodb:GetItem'
+                - 'dynamodb:PutItem'
+                - 'dynamodb:UpdateItem'
+              Resource: !GetAtt LinkTable.Arn
+
+###################################################################################################
+##   IAM Roles                                                                                   ##
+###################################################################################################
+
+  ##   Dynamo DB Read Role
+  DDBReadRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: "apigateway.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: DDBReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Action:
+              - dynamodb:GetItem
+              - dynamodb:Scan
+              - dynamodb:Query
+              Effect: Allow
+              Resource:
+                - !GetAtt LinkTable.Arn
+                - !Sub
+                  - ${TableArn}/index/*
+                  - {TableArn: !GetAtt LinkTable.Arn}
+
+###################################################################################################
+##   Metrics outputs                                                                            ##
+###################################################################################################
+
+  NotifyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: "sharad.gupta@clix.capital"
+          Protocol: "email"
+
+  APIGateway4xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "URL Shortener API 4xx Alarm"
+      AlarmDescription: "4xx monitor"
+      MetricName: "4XXError"
+      Namespace: "AWS/ApiGateway"
+      Dimensions:
+          - Name: "ApiName"
+            Value: "URL Shortener API"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: .01
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref NotifyTopic
+
+  APIGateway5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "URL Shortener API 5xx Alarm"
+      AlarmDescription: "5xx monitor"
+      MetricName: "5XXError"
+      Namespace: "AWS/ApiGateway"
+      Dimensions:
+          - Name: "ApiName"
+            Value: "URL Shortener API"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: .01
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref NotifyTopic
+
+  APIGatewayLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "URL Shortener API Latency Alarm"
+      AlarmDescription: "Latency monitor"
+      MetricName: "Latency"
+      Namespace: "AWS/ApiGateway"
+      Dimensions:
+          - Name: "ApiName"
+            Value: "URL Shortener API"
+      ExtendedStatistic: "p99"
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 75
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref NotifyTopic
+
+  DDB5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "URL Shortener DDB 5xx Alarm"
+      AlarmDescription: "System monitor"
+      MetricName: "SystemErrors"
+      Namespace: "AWS/DynamoDB"
+      Dimensions:
+          - Name: "TableName"
+            Value: !Ref LinkTable
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: .01
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref NotifyTopic
+
+  DDB4xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "URL Shortener DDB 4xx Alarm"
+      AlarmDescription: "User monitor"
+      MetricName: "UserErrors"
+      Namespace: "AWS/DynamoDB"
+      Dimensions:
+          - Name: "TableName"
+            Value: !Ref LinkTable
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: .10
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref NotifyTopic
+
+###################################################################################################
+##   Template outputs                                                                            ##
+###################################################################################################
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  ShortenAPI:
+    Description: "API Gateway endpoint URL for Prod environment for Shorten"
+    Value: !Sub "https://${ShortenerAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
