@@ -1,6 +1,5 @@
 # Sho.rt
 
-![Go](https://github.com/nahankid/shortie/workflows/Go/badge.svg)
 ![GitHub](https://img.shields.io/github/license/nahankid/sho.rt)
 [![Maintainability](https://api.codeclimate.com/v1/badges/eb06a36a6fcda7abc6f2/maintainability)](https://codeclimate.com/github/nahankid/sho.rt/maintainability)
 ![GitHub repo size](https://img.shields.io/github/repo-size/nahankid/sho.rt)
@@ -22,7 +21,7 @@ Entire appliation stack is 1-click deploy on AWS and uses:
 
 ## **Shorten a long url**
 
-```POST https://c1ix.me``` 
+```POST https://app.c1ix.me``` 
 
 ### Parameters
 
@@ -37,6 +36,16 @@ Entire appliation stack is 1-click deploy on AWS and uses:
 | Name         | Type     | Description                                              |
 | ------------ | ---------| -------------------------------------------------------- | 
 | url          | string   | Short URL                                                | 
+
+
+## **Share a short url**
+
+```c1ix.me/c439f9``` 
+
+
+## **Navigate to long url**
+
+Redirect ```c1ix.me/c439f9``` to ```https://app.c1ix.me/c439f9``` 
 
 
 ## Contributing to Shortie
